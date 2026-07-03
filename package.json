@@ -1,0 +1,47 @@
+{
+  "name": "pi-custom-provider-manager",
+  "version": "0.1.0",
+  "description": "Pi extension for managing OpenAI-compatible custom providers with /models discovery and models.dev enrichment.",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest --run",
+    "check": "tsc --noEmit && npm test"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "provider",
+    "openai-compatible",
+    "models.dev"
+  ],
+  "author": "Menghongfei",
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@types/node": "^24.12.4",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
