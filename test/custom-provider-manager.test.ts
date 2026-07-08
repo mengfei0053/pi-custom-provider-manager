@@ -270,7 +270,9 @@ describe("custom provider manager example extension", () => {
 				}),
 			);
 
-			await fixture.runProviderCommand("add bad https://example.com MY_GATEWAY_API_KEY");
+			await fixture.runProviderCommand(
+				"add bad https://example.com MY_GATEWAY_API_KEY",
+			);
 
 			expect(fixture.notify).toHaveBeenCalledWith(
 				expect.stringContaining("not JSON"),

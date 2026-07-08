@@ -36,7 +36,7 @@ jobs:
         run: pnpm run check
 
       - name: Publish to npm
-        run: pnpm publish --access public --provenance
+        run: pnpm publish --access public --provenance --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

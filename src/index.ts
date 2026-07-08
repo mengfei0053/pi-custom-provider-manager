@@ -410,7 +410,11 @@ async function fetchRemoteModels(
 		);
 	}
 	const responseData = (body as ModelsResponse).data;
-	const remoteModels: unknown[] = Array.isArray(responseData) ? responseData : Array.isArray(body) ? body : [];
+	const remoteModels: unknown[] = Array.isArray(responseData)
+		? responseData
+		: Array.isArray(body)
+			? body
+			: [];
 	const modelsDevLookup = await getModelsDevLookup();
 	const models = remoteModels
 		.map((item) =>
