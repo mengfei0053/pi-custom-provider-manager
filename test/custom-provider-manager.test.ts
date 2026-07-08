@@ -254,6 +254,37 @@ describe("custom provider manager example extension", () => {
 		}
 	});
 
+	it("reports a clear error when /models returns HTML", async () => {
+		const fixture = setup();
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (input.toString() === "https://models.dev/api.json") {
+						return new Response(JSON.stringify({}), { status: 200 });
+					}
+					return new Response("<!doctype html><html>Not Found</html>", {
+						status: 200,
+						headers: { "Content-Type": "text/html" },
+					});
+				}),
+			);
+
+			await fixture.runProviderCommand("add bad https://example.com MY_GATEWAY_API_KEY");
+
+			expect(fixture.notify).toHaveBeenCalledWith(
+				expect.stringContaining("not JSON"),
+				"error",
+			);
+			expect(fixture.notify).toHaveBeenCalledWith(
+				expect.stringContaining("OpenAI-compatible API root"),
+				"error",
+			);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
 	it("updates and deletes configured providers", async () => {
 		const fixture = setup();
 		try {

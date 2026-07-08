@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -36,6 +36,109 @@ jobs:
         run: pnpm run check
 
       - name: Publish to npm
-        run: pnpm publish --access public --provenance --no-git-checks
+        run: pnpm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          PACKAGE_VERSION="${TAG_NAME#v}"
+          cat > release-notes.md <<'EOF'
+          ## Pi Custom Provider Manager
+
+          Pi extension for managing OpenAI-compatible custom providers.
+
+          ### Installation
+
+          Install the latest version globally for Pi:
+
+          ```bash
+          pi install npm:@fe-essential/pi-custom-provider-manager
+          ```
+
+          Install this exact release:
+
+          ```bash
+          pi install npm:@fe-essential/pi-custom-provider-manager@__VERSION__
+          ```
+
+          Install only for the current project:
+
+          ```bash
+          pi install -l npm:@fe-essential/pi-custom-provider-manager
+          ```
+
+          Try it temporarily without writing settings:
+
+          ```bash
+          pi -e npm:@fe-essential/pi-custom-provider-manager
+          ```
+
+          ### Usage
+
+          Start Pi, then run `/provider` inside the Pi session.
+
+          Interactive setup:
+
+          ```text
+          /provider add
+          ```
+
+          The command prompts for:
+
+          1. Provider id
+          2. Base URL
+          3. API key environment variable or value
+          4. Display name
+
+          Non-interactive setup:
+
+          ```text
+          /provider add my-gateway https://example.com/v1 MY_GATEWAY_API_KEY
+          ```
+
+          Manage providers:
+
+          ```text
+          /provider sync my-gateway
+          /provider list
+          /provider show my-gateway
+          /provider set my-gateway apiKey MY_NEW_API_KEY
+          /provider delete my-gateway
+          ```
+
+          `apiKey` can be a direct value or an environment variable reference.
+          Examples: `MY_GATEWAY_API_KEY`, `$MY_GATEWAY_API_KEY`,
+          or `${MY_GATEWAY_API_KEY}`.
+
+          ### Config files
+
+          Provider config:
+
+          ```text
+          ~/.pi/agent/extensions/custom-provider-manager/providers.json
+          ```
+
+          models.dev cache:
+
+          ```text
+          ~/.pi/agent/extensions/custom-provider-manager/models-dev-cache.json
+          ```
+          EOF
+
+          sed -i "s/__VERSION__/${PACKAGE_VERSION}/g" release-notes.md
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" \
+              --title "$TAG_NAME" \
+              --notes-file release-notes.md
+          else
+            gh release create "$TAG_NAME" \
+              --verify-tag \
+              --title "$TAG_NAME" \
+              --notes-file release-notes.md
+          fi

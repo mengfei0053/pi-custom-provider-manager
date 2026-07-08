@@ -396,12 +396,21 @@ async function fetchRemoteModels(
 		);
 	}
 
-	const body = (await response.json()) as ModelsResponse;
-	const remoteModels = Array.isArray(body.data)
-		? body.data
-		: Array.isArray(body)
-			? body
-			: [];
+	const responseText = await response.text();
+	let body: ModelsResponse | unknown[];
+	try {
+		body = JSON.parse(responseText) as ModelsResponse | unknown[];
+	} catch (error) {
+		const contentType = response.headers.get("content-type") ?? "unknown";
+		const preview = responseText.trim().replace(/\s+/g, " ").slice(0, 160);
+		throw new Error(
+			`GET ${url} returned ${contentType}, not JSON. ` +
+				"Check that baseUrl points to an OpenAI-compatible API root " +
+				`such as https://example.com/v1. Response starts with: ${preview}`,
+		);
+	}
+	const responseData = (body as ModelsResponse).data;
+	const remoteModels: unknown[] = Array.isArray(responseData) ? responseData : Array.isArray(body) ? body : [];
 	const modelsDevLookup = await getModelsDevLookup();
 	const models = remoteModels
 		.map((item) =>
