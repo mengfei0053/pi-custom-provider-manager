@@ -1,6 +1,6 @@
 {
   "name": "@fe-essential/pi-custom-provider-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension for managing OpenAI-compatible custom providers with /models discovery and models.dev enrichment.",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
@@ -31,6 +31,10 @@
   ],
   "author": "Menghongfei",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mengfei0053/pi-custom-provider-manager.git"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
