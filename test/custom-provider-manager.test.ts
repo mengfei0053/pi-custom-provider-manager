@@ -4,9 +4,15 @@ import { join } from "node:path";
 import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import customProviderManager from "../src/index.ts";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 
-type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<void> | void;
+type CommandHandler = (
+	args: string,
+	ctx: ExtensionCommandContext,
+) => Promise<void> | void;
 
 function setup() {
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-provider-manager-"));
@@ -27,9 +33,11 @@ function setup() {
 	customProviderManager(api);
 
 	const notify = vi.fn();
+	const input = vi.fn<ExtensionCommandContext["ui"]["input"]>();
 	const ctx = {
-		ui: { notify },
-	} as unknown as ExtensionContext;
+		hasUI: true,
+		ui: { notify, input },
+	} as unknown as ExtensionCommandContext;
 
 	async function runProviderCommand(args: string): Promise<void> {
 		const command = commands.get("provider");
@@ -38,7 +46,17 @@ function setup() {
 	}
 
 	function readModelsConfig(): unknown {
-		return JSON.parse(readFileSync(join(tempDir, "extensions", "custom-provider-manager", "providers.json"), "utf8"));
+		const raw = readFileSync(
+			join(tempDir, "extensions", "custom-provider-manager", "providers.json"),
+			"utf8",
+		);
+		try {
+			return JSON.parse(raw);
+		} catch (error) {
+			throw new Error(
+				`Failed to parse test provider config: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	function cleanup() {
@@ -50,7 +68,15 @@ function setup() {
 		rmSync(tempDir, { recursive: true, force: true });
 	}
 
-	return { cleanup, notify, readModelsConfig, registerProvider, runProviderCommand, unregisterProvider };
+	return {
+		cleanup,
+		input,
+		notify,
+		readModelsConfig,
+		registerProvider,
+		runProviderCommand,
+		unregisterProvider,
+	};
 }
 
 describe("custom provider manager example extension", () => {
@@ -72,7 +98,12 @@ describe("custom provider manager example extension", () => {
 										id: "model-c",
 										name: "Model C from models.dev",
 										reasoning: true,
-										cost: { input: 1.25, output: 5, cache_read: 0.2, cache_write: 1.5 },
+										cost: {
+											input: 1.25,
+											output: 5,
+											cache_read: 0.2,
+											cache_write: 1.5,
+										},
 										limit: { context: 256000, output: 32000 },
 										modalities: { input: ["text", "image"], output: ["text"] },
 									},
@@ -85,7 +116,11 @@ describe("custom provider manager example extension", () => {
 				return new Response(
 					JSON.stringify({
 						data: [
-							{ id: "model-a", context_window: 32000, input_modalities: ["text"] },
+							{
+								id: "model-a",
+								context_window: 32000,
+								input_modalities: ["text"],
+							},
 							{
 								id: "model-b",
 								display_name: "Model B",
@@ -101,9 +136,13 @@ describe("custom provider manager example extension", () => {
 			});
 			vi.stubGlobal("fetch", fetchMock);
 
-			await fixture.runProviderCommand("add my-gateway https://example.com/v1 MY_GATEWAY_API_KEY My Gateway");
+			await fixture.runProviderCommand(
+				"add my-gateway https://example.com/v1 MY_GATEWAY_API_KEY My Gateway",
+			);
 
-			expect(fetchMock).toHaveBeenCalledWith("https://example.com/v1/models", { headers: {} });
+			expect(fetchMock).toHaveBeenCalledWith("https://example.com/v1/models", {
+				headers: {},
+			});
 			expect(fixture.registerProvider).toHaveBeenCalledWith(
 				"my-gateway",
 				expect.objectContaining({
@@ -111,7 +150,11 @@ describe("custom provider manager example extension", () => {
 					apiKey: "MY_GATEWAY_API_KEY",
 					baseUrl: "https://example.com/v1",
 					models: expect.arrayContaining([
-						expect.objectContaining({ id: "model-a", input: ["text"], contextWindow: 32000 }),
+						expect.objectContaining({
+							id: "model-a",
+							input: ["text"],
+							contextWindow: 32000,
+						}),
 						expect.objectContaining({
 							id: "model-b",
 							name: "Model B",
@@ -148,6 +191,69 @@ describe("custom provider manager example extension", () => {
 		}
 	});
 
+	it("prompts for missing add arguments interactively", async () => {
+		const fixture = setup();
+		try {
+			fixture.input
+				.mockResolvedValueOnce("interactive-gateway")
+				.mockResolvedValueOnce("https://interactive.example.com/v1")
+				.mockResolvedValueOnce("INTERACTIVE_API_KEY")
+				.mockResolvedValueOnce("Interactive Gateway");
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (input.toString() === "https://models.dev/api.json") {
+						return new Response(JSON.stringify({}), { status: 200 });
+					}
+					return new Response(JSON.stringify({ data: [{ id: "model-a" }] }), {
+						status: 200,
+					});
+				}),
+			);
+
+			await fixture.runProviderCommand("add");
+
+			expect(fixture.input).toHaveBeenNthCalledWith(
+				1,
+				"Provider id",
+				"my-gateway",
+			);
+			expect(fixture.input).toHaveBeenNthCalledWith(
+				2,
+				"Base URL",
+				"https://example.com/v1",
+			);
+			expect(fixture.input).toHaveBeenNthCalledWith(
+				3,
+				"API key env or value",
+				"MY_GATEWAY_API_KEY",
+			);
+			expect(fixture.input).toHaveBeenNthCalledWith(
+				4,
+				"Display name",
+				"interactive-gateway",
+			);
+			expect(fixture.registerProvider).toHaveBeenCalledWith(
+				"interactive-gateway",
+				expect.objectContaining({
+					name: "Interactive Gateway",
+					baseUrl: "https://interactive.example.com/v1",
+					apiKey: "INTERACTIVE_API_KEY",
+				}),
+			);
+			expect(fixture.readModelsConfig()).toMatchObject({
+				providers: {
+					"interactive-gateway": {
+						name: "Interactive Gateway",
+						baseUrl: "https://interactive.example.com/v1",
+					},
+				},
+			});
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
 	it("updates and deletes configured providers", async () => {
 		const fixture = setup();
 		try {
@@ -157,12 +263,18 @@ describe("custom provider manager example extension", () => {
 					if (input.toString() === "https://models.dev/api.json") {
 						return new Response(JSON.stringify({}), { status: 200 });
 					}
-					return new Response(JSON.stringify({ data: [{ id: "model-a" }] }), { status: 200 });
+					return new Response(JSON.stringify({ data: [{ id: "model-a" }] }), {
+						status: 200,
+					});
 				}),
 			);
 
-			await fixture.runProviderCommand("add my-gateway https://example.com/v1 MY_GATEWAY_API_KEY");
-			await fixture.runProviderCommand("set my-gateway baseUrl https://other.example.com/v1");
+			await fixture.runProviderCommand(
+				"add my-gateway https://example.com/v1 MY_GATEWAY_API_KEY",
+			);
+			await fixture.runProviderCommand(
+				"set my-gateway baseUrl https://other.example.com/v1",
+			);
 			await fixture.runProviderCommand("delete my-gateway");
 
 			expect(fixture.unregisterProvider).toHaveBeenCalledWith("my-gateway");

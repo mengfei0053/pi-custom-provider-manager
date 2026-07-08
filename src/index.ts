@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import type { Api } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	getAgentDir,
 	type ProviderConfig,
 	type ProviderModelConfig,
@@ -55,6 +56,13 @@ interface ManagedModelConfig {
 	maxTokens?: number;
 	headers?: Record<string, string>;
 	compat?: ProviderModelConfig["compat"];
+}
+
+interface ProviderAddInput {
+	providerId: string;
+	baseUrl: string;
+	apiKey: string;
+	name?: string;
 }
 
 interface ModelsResponse {
@@ -116,7 +124,10 @@ const DEFAULT_API: Api = "openai-completions";
 const DEFAULT_CONTEXT_WINDOW = 128000;
 const DEFAULT_MAX_TOKENS = 16384;
 const DEFAULT_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-const DEFAULT_COMPAT = { supportsDeveloperRole: false, maxTokensField: "max_tokens" } as ProviderModelConfig["compat"];
+const DEFAULT_COMPAT = {
+	supportsDeveloperRole: false,
+	maxTokensField: "max_tokens",
+} as ProviderModelConfig["compat"];
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_FILE = "models-dev-cache.json";
 const MODELS_DEV_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -125,11 +136,21 @@ const PROVIDER_MANAGER_DIR = "custom-provider-manager";
 const PROVIDER_CONFIG_FILE = "providers.json";
 
 function getProviderConfigPath(): string {
-	return join(getAgentDir(), "extensions", PROVIDER_MANAGER_DIR, PROVIDER_CONFIG_FILE);
+	return join(
+		getAgentDir(),
+		"extensions",
+		PROVIDER_MANAGER_DIR,
+		PROVIDER_CONFIG_FILE,
+	);
 }
 
 function getModelsDevCachePath(): string {
-	return join(getAgentDir(), "extensions", PROVIDER_MANAGER_DIR, MODELS_DEV_CACHE_FILE);
+	return join(
+		getAgentDir(),
+		"extensions",
+		PROVIDER_MANAGER_DIR,
+		MODELS_DEV_CACHE_FILE,
+	);
 }
 
 function readModelsConfig(): ModelsConfig {
@@ -141,8 +162,14 @@ function readModelsConfig(): ModelsConfig {
 	if (!raw) {
 		return { providers: {} };
 	}
-	const parsed = JSON.parse(raw) as Partial<ModelsConfig>;
-	return { providers: parsed.providers ?? {} };
+	try {
+		const parsed = JSON.parse(raw) as Partial<ModelsConfig>;
+		return { providers: parsed.providers ?? {} };
+	} catch (error) {
+		throw new Error(
+			`Failed to parse provider config at ${path}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
 
 function writeModelsConfig(config: ModelsConfig): void {
@@ -180,7 +207,11 @@ function modelForRuntime(model: ManagedModelConfig): ProviderModelConfig {
 	};
 }
 
-function registerRuntimeProvider(pi: ExtensionAPI, providerId: string, provider: ManagedProviderConfig): void {
+function registerRuntimeProvider(
+	pi: ExtensionAPI,
+	providerId: string,
+	provider: ManagedProviderConfig,
+): void {
 	if (!provider.models || provider.models.length === 0) {
 		return;
 	}
@@ -245,25 +276,39 @@ function normalizeBaseUrl(baseUrl: string): string {
 	return baseUrl.replace(/\/+$/, "");
 }
 
-function redactProvider(provider: ManagedProviderConfig): ManagedProviderConfig {
+function redactProvider(
+	provider: ManagedProviderConfig,
+): ManagedProviderConfig {
 	return {
 		...provider,
 		apiKey: provider.apiKey ? redactConfigValue(provider.apiKey) : undefined,
 		headers: provider.headers
-			? Object.fromEntries(Object.entries(provider.headers).map(([k, v]) => [k, redactHeader(k, v)]))
+			? Object.fromEntries(
+					Object.entries(provider.headers).map(([k, v]) => [
+						k,
+						redactHeader(k, v),
+					]),
+				)
 			: undefined,
 	};
 }
 
 function redactConfigValue(value: string): string {
-	if (/^[A-Z_][A-Z0-9_]*$/.test(value) || value.startsWith("$") || value.startsWith("${") || value.startsWith("!")) {
+	if (
+		/^[A-Z_][A-Z0-9_]*$/.test(value) ||
+		value.startsWith("$") ||
+		value.startsWith("${") ||
+		value.startsWith("!")
+	) {
 		return value;
 	}
 	return "<redacted>";
 }
 
 function redactHeader(key: string, value: string): string {
-	return /authorization|api[-_]?key|token/i.test(key) ? redactConfigValue(value) : value;
+	return /authorization|api[-_]?key|token/i.test(key)
+		? redactConfigValue(value)
+		: value;
 }
 
 function usage(): string {
@@ -271,13 +316,55 @@ function usage(): string {
 		"Usage:",
 		"  /provider list",
 		"  /provider show <id>",
-		"  /provider add <id> <baseUrl> <apiKeyEnvOrValue> [displayName]",
+		"  /provider add [id] [baseUrl] [apiKeyEnvOrValue] [displayName]",
 		"  /provider sync <id>",
 		"  /provider set <id> <baseUrl|apiKey|name|api|authHeader> <value>",
 		"  /provider delete <id>",
 		"",
+		"Run /provider add without arguments for an interactive setup wizard.",
 		"Defaults: api=openai-completions, authHeader=true, models from <baseUrl>/models.",
 	].join("\n");
+}
+
+async function collectProviderAddInput(
+	rest: string[],
+	ctx: ExtensionCommandContext,
+): Promise<ProviderAddInput> {
+	const [providerIdArg, baseUrlArg, apiKeyArg, ...nameParts] = rest;
+	const needsPrompt = !providerIdArg || !baseUrlArg || !apiKeyArg;
+	if (needsPrompt && !ctx.hasUI) {
+		throw new Error(
+			"Usage: /provider add <id> <baseUrl> <apiKeyEnvOrValue> [displayName]",
+		);
+	}
+
+	const providerId =
+		providerIdArg ?? (await promptRequired(ctx, "Provider id", "my-gateway"));
+	const baseUrl =
+		baseUrlArg ??
+		(await promptRequired(ctx, "Base URL", "https://example.com/v1"));
+	const apiKey =
+		apiKeyArg ??
+		(await promptRequired(ctx, "API key env or value", "MY_GATEWAY_API_KEY"));
+	const name =
+		nameParts.join(" ") ||
+		(ctx.hasUI
+			? ((await ctx.ui.input("Display name", providerId))?.trim() ?? "")
+			: "");
+
+	return { providerId, baseUrl, apiKey, name: name || undefined };
+}
+
+async function promptRequired(
+	ctx: ExtensionCommandContext,
+	title: string,
+	placeholder: string,
+): Promise<string> {
+	const value = (await ctx.ui.input(title, placeholder))?.trim();
+	if (!value) {
+		throw new Error(`${title} is required.`);
+	}
+	return value;
 }
 
 function parseBoolean(value: string): boolean {
@@ -286,7 +373,10 @@ function parseBoolean(value: string): boolean {
 	throw new Error(`Invalid boolean: ${value}`);
 }
 
-async function fetchRemoteModels(providerId: string, provider: ManagedProviderConfig): Promise<ManagedModelConfig[]> {
+async function fetchRemoteModels(
+	providerId: string,
+	provider: ManagedProviderConfig,
+): Promise<ManagedModelConfig[]> {
 	if (!provider.baseUrl) {
 		throw new Error(`Provider ${providerId}: baseUrl is required before sync.`);
 	}
@@ -301,14 +391,22 @@ async function fetchRemoteModels(providerId: string, provider: ManagedProviderCo
 
 	const response = await fetch(url, { headers });
 	if (!response.ok) {
-		throw new Error(`GET ${url} failed: ${response.status} ${await response.text()}`);
+		throw new Error(
+			`GET ${url} failed: ${response.status} ${await response.text()}`,
+		);
 	}
 
 	const body = (await response.json()) as ModelsResponse;
-	const remoteModels = Array.isArray(body.data) ? body.data : Array.isArray(body) ? body : [];
+	const remoteModels = Array.isArray(body.data)
+		? body.data
+		: Array.isArray(body)
+			? body
+			: [];
 	const modelsDevLookup = await getModelsDevLookup();
 	const models = remoteModels
-		.map((item) => toManagedModel(item as RemoteModel, provider, modelsDevLookup))
+		.map((item) =>
+			toManagedModel(item as RemoteModel, provider, modelsDevLookup),
+		)
 		.filter((model): model is ManagedModelConfig => model !== undefined);
 	if (models.length === 0) {
 		throw new Error(`GET ${url} returned no usable models.`);
@@ -328,9 +426,12 @@ async function getModelsDevLookup(): Promise<Map<string, ModelsDevModel>> {
 	return lookup;
 }
 
-async function getModelsDevCatalog(): Promise<Record<string, ModelsDevProvider>> {
+async function getModelsDevCatalog(): Promise<
+	Record<string, ModelsDevProvider>
+> {
 	const cached = readModelsDevCache();
-	if (cached && Date.now() - cached.timestamp <= MODELS_DEV_CACHE_TTL_MS) return cached.data;
+	if (cached && Date.now() - cached.timestamp <= MODELS_DEV_CACHE_TTL_MS)
+		return cached.data;
 
 	try {
 		const response = await fetch(MODELS_DEV_URL);
@@ -356,7 +457,11 @@ function readModelsDevCache(): ModelsDevCache | undefined {
 function writeModelsDevCache(data: Record<string, ModelsDevProvider>): void {
 	const path = getModelsDevCachePath();
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify({ timestamp: Date.now(), data }, null, "\t")}\n`, "utf8");
+	writeFileSync(
+		path,
+		`${JSON.stringify({ timestamp: Date.now(), data }, null, "\t")}\n`,
+		"utf8",
+	);
 }
 
 function normalizeModelId(id: string): string {
@@ -405,14 +510,21 @@ function toManagedModel(
 	};
 }
 
-function getModelName(item: RemoteModel, modelsDevModel?: ModelsDevModel): string {
+function getModelName(
+	item: RemoteModel,
+	modelsDevModel?: ModelsDevModel,
+): string {
 	if (typeof item.name === "string" && item.name.length > 0) return item.name;
-	if (typeof item.display_name === "string" && item.display_name.length > 0) return item.display_name;
+	if (typeof item.display_name === "string" && item.display_name.length > 0)
+		return item.display_name;
 	if (modelsDevModel?.name) return modelsDevModel.name;
 	return item.id as string;
 }
 
-function detectContextWindow(item: RemoteModel, modelsDevModel?: ModelsDevModel): number {
+function detectContextWindow(
+	item: RemoteModel,
+	modelsDevModel?: ModelsDevModel,
+): number {
 	return (
 		positiveNumber(item.context_window) ??
 		positiveNumber(item.contextWindow) ??
@@ -425,7 +537,10 @@ function detectContextWindow(item: RemoteModel, modelsDevModel?: ModelsDevModel)
 	);
 }
 
-function detectMaxTokens(item: RemoteModel, modelsDevModel?: ModelsDevModel): number {
+function detectMaxTokens(
+	item: RemoteModel,
+	modelsDevModel?: ModelsDevModel,
+): number {
 	return (
 		positiveNumber(item.max_output_tokens) ??
 		positiveNumber(item.max_completion_tokens) ??
@@ -436,19 +551,37 @@ function detectMaxTokens(item: RemoteModel, modelsDevModel?: ModelsDevModel): nu
 }
 
 function positiveNumber(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? value
+		: undefined;
 }
 
-function detectCost(item: RemoteModel, modelsDevModel?: ModelsDevModel): ProviderModelConfig["cost"] {
+function detectCost(
+	item: RemoteModel,
+	modelsDevModel?: ModelsDevModel,
+): ProviderModelConfig["cost"] {
 	return {
-		input: positiveNumber(item.input_cost) ?? positiveNumber(modelsDevModel?.cost?.input) ?? DEFAULT_COST.input,
-		output: positiveNumber(item.output_cost) ?? positiveNumber(modelsDevModel?.cost?.output) ?? DEFAULT_COST.output,
-		cacheRead: positiveNumber(modelsDevModel?.cost?.cache_read) ?? DEFAULT_COST.cacheRead,
-		cacheWrite: positiveNumber(modelsDevModel?.cost?.cache_write) ?? DEFAULT_COST.cacheWrite,
+		input:
+			positiveNumber(item.input_cost) ??
+			positiveNumber(modelsDevModel?.cost?.input) ??
+			DEFAULT_COST.input,
+		output:
+			positiveNumber(item.output_cost) ??
+			positiveNumber(modelsDevModel?.cost?.output) ??
+			DEFAULT_COST.output,
+		cacheRead:
+			positiveNumber(modelsDevModel?.cost?.cache_read) ??
+			DEFAULT_COST.cacheRead,
+		cacheWrite:
+			positiveNumber(modelsDevModel?.cost?.cache_write) ??
+			DEFAULT_COST.cacheWrite,
 	};
 }
 
-function detectInputModalities(item: RemoteModel, modelsDevModel?: ModelsDevModel): ("text" | "image")[] {
+function detectInputModalities(
+	item: RemoteModel,
+	modelsDevModel?: ModelsDevModel,
+): ("text" | "image")[] {
 	const modelsDevInputs = modelsDevModel?.modalities?.input ?? [];
 	const values = collectStringValues(
 		item.input,
@@ -457,7 +590,9 @@ function detectInputModalities(item: RemoteModel, modelsDevModel?: ModelsDevMode
 		item.capabilities,
 		modelsDevInputs,
 	);
-	const supportsImage = values.some((value) => ["image", "vision", "multimodal"].includes(value));
+	const supportsImage = values.some((value) =>
+		["image", "vision", "multimodal"].includes(value),
+	);
 	return supportsImage ? ["text", "image"] : ["text"];
 }
 
@@ -484,11 +619,14 @@ export default function customProviderManager(pi: ExtensionAPI) {
 	loadConfiguredProviders(pi);
 
 	pi.registerCommand("provider", {
-		description: "Manage custom providers in the extension-owned providers.json",
+		description:
+			"Manage custom providers in the extension-owned providers.json",
 		getArgumentCompletions: (prefix) => {
 			const actions = ["list", "show", "add", "sync", "set", "delete"];
 			const matches = actions.filter((action) => action.startsWith(prefix));
-			return matches.length > 0 ? matches.map((action) => ({ value: action, label: action })) : null;
+			return matches.length > 0
+				? matches.map((action) => ({ value: action, label: action }))
+				: null;
 		},
 		handler: async (args, ctx) => {
 			try {
@@ -502,11 +640,43 @@ export default function customProviderManager(pi: ExtensionAPI) {
 
 				if (action === "list") {
 					const ids = Object.keys(config.providers).sort();
-					ctx.ui.notify(ids.length > 0 ? ids.join("\n") : "No custom providers configured.", "info");
+					ctx.ui.notify(
+						ids.length > 0 ? ids.join("\n") : "No custom providers configured.",
+						"info",
+					);
 					return;
 				}
 
 				const providerId = rest[0];
+
+				if (action === "add") {
+					const input = await collectProviderAddInput(rest, ctx);
+					config.providers[input.providerId] = {
+						name: input.name ?? input.providerId,
+						baseUrl: normalizeBaseUrl(input.baseUrl),
+						apiKey: input.apiKey,
+						api: DEFAULT_API,
+						authHeader: true,
+						compat: DEFAULT_COMPAT,
+						models: [],
+					};
+					config.providers[input.providerId].models = await fetchRemoteModels(
+						input.providerId,
+						config.providers[input.providerId],
+					);
+					writeModelsConfig(config);
+					registerRuntimeProvider(
+						pi,
+						input.providerId,
+						config.providers[input.providerId],
+					);
+					ctx.ui.notify(
+						`Added ${input.providerId} with ${config.providers[input.providerId].models?.length ?? 0} models.`,
+						"info",
+					);
+					return;
+				}
+
 				if (!providerId) {
 					throw new Error(`Missing provider id.\n${usage()}`);
 				}
@@ -521,37 +691,16 @@ export default function customProviderManager(pi: ExtensionAPI) {
 					return;
 				}
 
-				if (action === "add") {
-					const [, baseUrl, apiKey, ...nameParts] = rest;
-					if (!baseUrl || !apiKey) {
-						throw new Error("Usage: /provider add <id> <baseUrl> <apiKeyEnvOrValue> [displayName]");
-					}
-					config.providers[providerId] = {
-						name: nameParts.join(" ") || providerId,
-						baseUrl: normalizeBaseUrl(baseUrl),
-						apiKey,
-						api: DEFAULT_API,
-						authHeader: true,
-						compat: DEFAULT_COMPAT,
-						models: [],
-					};
-					config.providers[providerId].models = await fetchRemoteModels(providerId, config.providers[providerId]);
-					writeModelsConfig(config);
-					registerRuntimeProvider(pi, providerId, config.providers[providerId]);
-					ctx.ui.notify(
-						`Added ${providerId} with ${config.providers[providerId].models?.length ?? 0} models.`,
-						"info",
-					);
-					return;
-				}
-
 				if (action === "sync") {
 					const provider = config.providers[providerId];
 					if (!provider) throw new Error(`Provider not found: ${providerId}`);
 					provider.models = await fetchRemoteModels(providerId, provider);
 					writeModelsConfig(config);
 					registerRuntimeProvider(pi, providerId, provider);
-					ctx.ui.notify(`Synced ${provider.models.length} models for ${providerId}.`, "info");
+					ctx.ui.notify(
+						`Synced ${provider.models.length} models for ${providerId}.`,
+						"info",
+					);
 					return;
 				}
 
@@ -561,13 +710,16 @@ export default function customProviderManager(pi: ExtensionAPI) {
 					const [, field, ...valueParts] = rest;
 					const value = valueParts.join(" ");
 					if (!field || !value) {
-						throw new Error("Usage: /provider set <id> <baseUrl|apiKey|name|api|authHeader> <value>");
+						throw new Error(
+							"Usage: /provider set <id> <baseUrl|apiKey|name|api|authHeader> <value>",
+						);
 					}
 					if (field === "baseUrl") provider.baseUrl = normalizeBaseUrl(value);
 					else if (field === "apiKey") provider.apiKey = value;
 					else if (field === "name") provider.name = value;
 					else if (field === "api") provider.api = value as Api;
-					else if (field === "authHeader") provider.authHeader = parseBoolean(value);
+					else if (field === "authHeader")
+						provider.authHeader = parseBoolean(value);
 					else throw new Error(`Unsupported field: ${field}`);
 					writeModelsConfig(config);
 					registerRuntimeProvider(pi, providerId, provider);
@@ -579,7 +731,8 @@ export default function customProviderManager(pi: ExtensionAPI) {
 				}
 
 				if (action === "delete" || action === "remove") {
-					if (!config.providers[providerId]) throw new Error(`Provider not found: ${providerId}`);
+					if (!config.providers[providerId])
+						throw new Error(`Provider not found: ${providerId}`);
 					delete config.providers[providerId];
 					writeModelsConfig(config);
 					pi.unregisterProvider(providerId);
@@ -589,7 +742,10 @@ export default function customProviderManager(pi: ExtensionAPI) {
 
 				throw new Error(`Unknown action: ${action}\n${usage()}`);
 			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				ctx.ui.notify(
+					error instanceof Error ? error.message : String(error),
+					"error",
+				);
 			}
 		},
 	});
