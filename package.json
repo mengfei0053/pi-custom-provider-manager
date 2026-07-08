@@ -1,5 +1,5 @@
 {
-  "name": "pi-custom-provider-manager",
+  "name": "@fe-essential/pi-custom-provider-manager",
   "version": "0.1.0",
   "description": "Pi extension for managing OpenAI-compatible custom providers with /models discovery and models.dev enrichment.",
   "type": "module",
