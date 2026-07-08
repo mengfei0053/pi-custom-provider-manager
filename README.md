@@ -80,9 +80,43 @@ Defaults:
 ## Development
 
 ```bash
-npm install --ignore-scripts
-npm test
-npm run check
+pnpm install --ignore-scripts
+pnpm test
+pnpm run check
+```
+
+## Publishing
+
+This package is published to npm as:
+
+```text
+@fe-essential/pi-custom-provider-manager
+```
+
+Publishing is handled by GitHub Actions when a Git tag is pushed. Before publishing, make sure the repository has an npm publish token configured as a GitHub Actions secret:
+
+```text
+NPM_TOKEN
+```
+
+To publish a new version:
+
+```bash
+pnpm version patch # or minor / major
+git push origin main --follow-tags
+```
+
+Alternatively, create and push a tag manually:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow runs `pnpm install --frozen-lockfile`, `pnpm run check`, then publishes with:
+
+```bash
+pnpm publish --access public --provenance --no-git-checks
 ```
 
 ## License

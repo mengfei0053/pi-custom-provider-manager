@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Pi extension for managing OpenAI-compatible custom providers with /models discovery and models.dev enrichment.",
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"
@@ -14,7 +15,7 @@
   ],
   "scripts": {
     "test": "vitest --run",
-    "check": "tsc --noEmit && npm test"
+    "check": "tsc --noEmit && pnpm test"
   },
   "pi": {
     "extensions": [
