@@ -36,8 +36,8 @@ jobs:
       - name: Run checks
         run: pnpm run check
 
-      - name: Verify npm auth
-        timeout-minutes: 2
+      - name: Publish to npm
+        timeout-minutes: 12
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -46,23 +46,53 @@ jobs:
             echo "NPM_TOKEN secret is empty" >&2
             exit 1
           fi
-          echo "Probe registry (no auth)..."
-          curl -fsS --max-time 20 --ipv4             -o /tmp/npm-pkg.json -w "pkg_http=%{http_code} time=%{time_total}\n"             https://registry.npmjs.org/@fe-essential/pi-custom-provider-manager
-          echo "Probe whoami (auth)..."
-          code=$(curl -sS --max-time 20 --ipv4             -o /tmp/npm-whoami.json -w "%{http_code}"             -H "Authorization: Bearer ${NODE_AUTH_TOKEN}"             https://registry.npmjs.org/-/whoami || true)
-          echo "whoami_http=$code"
-          cat /tmp/npm-whoami.json || true
-          echo
-          if [ "$code" != "200" ]; then
-            echo "npm auth failed (HTTP $code). Rotate repo secret NPM_TOKEN." >&2
-            exit 1
+          # Trim accidental whitespace/newlines from secret
+          export NODE_AUTH_TOKEN="$(printf '%s' "$NODE_AUTH_TOKEN" | tr -d '\r\n')"
+          echo "token_len=${#NODE_AUTH_TOKEN} prefix=${NODE_AUTH_TOKEN:0:4}"
+
+          echo "Checking npm status..."
+          curl -fsS --max-time 10 https://status.npmjs.org/api/v2/status.json \
+            | tee /tmp/npm-status.json \
+            | python3 -c "import sys,json; s=json.load(sys.stdin).get('status',{}); print(s.get('indicator'), s.get('description'))" \
+            || true
+
+          # Auth probe with retries (npm auth endpoints hang during publishing outages)
+          auth_ok=0
+          for i in 1 2 3 4 5; do
+            echo "whoami attempt $i..."
+            code=$(curl -sS --max-time 15 --ipv4 --http1.1 \
+              -o /tmp/npm-whoami.json -w "%{http_code}" \
+              -H "Authorization: Bearer ${NODE_AUTH_TOKEN}" \
+              https://registry.npmjs.org/-/whoami || true)
+            echo "whoami_http=$code"
+            if [ "$code" = "200" ]; then
+              cat /tmp/npm-whoami.json; echo
+              auth_ok=1
+              break
+            fi
+            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+              echo "npm auth rejected (HTTP $code). Rotate repo secret NPM_TOKEN." >&2
+              cat /tmp/npm-whoami.json || true
+              exit 1
+            fi
+            sleep $((i * 15))
+          done
+          if [ "$auth_ok" != "1" ]; then
+            echo "npm auth endpoint unreachable after retries (likely npm publishing outage)." >&2
+            echo "See https://status.npmjs.org — will still attempt publish with retries." >&2
           fi
 
-      - name: Publish to npm
-        timeout-minutes: 5
-        run: pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          for i in 1 2 3 4 5 6; do
+            echo "publish attempt $i..."
+            if pnpm publish --access public --no-git-checks; then
+              echo "publish ok"
+              exit 0
+            fi
+            echo "publish failed; sleeping..."
+            sleep $((i * 20))
+          done
+          echo "publish failed after retries" >&2
+          exit 1
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
