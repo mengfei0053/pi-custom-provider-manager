@@ -37,13 +37,21 @@ jobs:
         run: pnpm run check
 
       - name: Verify npm auth
-        run: npm whoami
+        timeout-minutes: 1
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret is empty" >&2
+            exit 1
+          fi
+          # Fail fast; npm whoami can hang on bad/interactive auth.
+          curl -fsS --max-time 20             -H "Authorization: Bearer ${NODE_AUTH_TOKEN}"             https://registry.npmjs.org/-/whoami
+          echo
 
       - name: Publish to npm
         timeout-minutes: 5
-        run: pnpm publish --access public --provenance --no-git-checks
+        run: pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
