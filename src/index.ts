@@ -79,6 +79,7 @@ interface RemoteModel {
 	max_context_tokens?: unknown;
 	max_input_tokens?: unknown;
 	max_model_len?: unknown;
+	max_allowed_size?: unknown;
 	max_output_tokens?: unknown;
 	max_completion_tokens?: unknown;
 	maxTokens?: unknown;
@@ -88,6 +89,13 @@ interface RemoteModel {
 	capabilities?: unknown;
 	input_cost?: unknown;
 	output_cost?: unknown;
+	supports_reasoning?: unknown;
+	only_reasoning?: unknown;
+	can_disable_thinking?: unknown;
+	reasoning_supported_efforts?: unknown;
+	reasoning_default_effort?: unknown;
+	reasoning_effort?: unknown;
+	supports_images?: unknown;
 }
 
 interface ModelsDevModel {
@@ -510,17 +518,90 @@ function toManagedModel(
 		return undefined;
 	}
 	const modelsDevModel = modelsDevLookup.get(normalizeModelId(item.id));
+	const reasoning = detectReasoning(item, modelsDevModel);
+	const thinkingLevelMap = detectThinkingLevelMap(item, reasoning);
 	return {
 		id: item.id,
 		name: getModelName(item, modelsDevModel),
 		api: provider.api ?? DEFAULT_API,
-		reasoning: modelsDevModel?.reasoning ?? false,
+		reasoning,
+		thinkingLevelMap,
 		input: detectInputModalities(item, modelsDevModel),
 		cost: detectCost(item, modelsDevModel),
 		contextWindow: detectContextWindow(item, modelsDevModel),
 		maxTokens: detectMaxTokens(item, modelsDevModel),
 		compat: provider.compat ?? DEFAULT_COMPAT,
 	};
+}
+
+const PI_THINKING_LEVELS = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
+
+function detectReasoning(
+	item: RemoteModel,
+	modelsDevModel?: ModelsDevModel,
+): boolean {
+	if (item.supports_reasoning === true || item.only_reasoning === true) {
+		return true;
+	}
+	if (item.supports_reasoning === false && item.only_reasoning !== true) {
+		return false;
+	}
+	return modelsDevModel?.reasoning ?? false;
+}
+
+function detectThinkingLevelMap(
+	item: RemoteModel,
+	reasoning: boolean,
+): ManagedModelConfig["thinkingLevelMap"] | undefined {
+	if (!reasoning) {
+		return undefined;
+	}
+
+	const supported = new Set<string>();
+	if (Array.isArray(item.reasoning_supported_efforts)) {
+		for (const value of item.reasoning_supported_efforts) {
+			if (typeof value === "string" && value.trim()) {
+				supported.add(value.trim().toLowerCase());
+			}
+		}
+	}
+	for (const value of [item.reasoning_default_effort, item.reasoning_effort]) {
+		if (typeof value === "string" && value.trim()) {
+			supported.add(value.trim().toLowerCase());
+		}
+	}
+
+	const map: NonNullable<ManagedModelConfig["thinkingLevelMap"]> = {};
+	const canDisable =
+		item.can_disable_thinking === true || item.only_reasoning !== true;
+
+	for (const level of PI_THINKING_LEVELS) {
+		if (level === "off") {
+			map.off = canDisable ? "off" : null;
+			continue;
+		}
+		if (supported.has(level)) {
+			map[level] = level;
+			continue;
+		}
+		// Mark unsupported standard levels explicitly; xhigh/max stay opt-in.
+		if (level === "xhigh" || level === "max") {
+			continue;
+		}
+		if (supported.size > 0) {
+			map[level] = null;
+		}
+	}
+
+	return Object.keys(map).length > 0 ? map : undefined;
 }
 
 function getModelName(
@@ -544,6 +625,7 @@ function detectContextWindow(
 		positiveNumber(item.max_context_tokens) ??
 		positiveNumber(item.max_model_len) ??
 		positiveNumber(item.context_length) ??
+		positiveNumber(item.max_allowed_size) ??
 		positiveNumber(item.max_input_tokens) ??
 		positiveNumber(modelsDevModel?.limit?.context) ??
 		DEFAULT_CONTEXT_WINDOW
@@ -595,6 +677,9 @@ function detectInputModalities(
 	item: RemoteModel,
 	modelsDevModel?: ModelsDevModel,
 ): ("text" | "image")[] {
+	if (item.supports_images === true) {
+		return ["text", "image"];
+	}
 	const modelsDevInputs = modelsDevModel?.modalities?.input ?? [];
 	const values = collectStringValues(
 		item.input,

@@ -122,3 +122,13 @@ pnpm publish --access public --provenance --no-git-checks
 ## License
 
 MIT
+
+## WorkBuddy / OpenAI-compatible reasoning fields
+
+On sync, these remote `/models` fields are mapped when present:
+
+- `supports_reasoning` / `only_reasoning` → `reasoning`
+- `reasoning_supported_efforts` (+ default/effort) → `thinkingLevelMap`
+- `can_disable_thinking` → whether `off` is allowed
+- `supports_images` → `input: ["text","image"]`
+- `context_length` / `max_allowed_size` → `contextWindow`
