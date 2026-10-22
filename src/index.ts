@@ -579,7 +579,8 @@ function detectThinkingLevelMap(
 		}
 	}
 
-	const map: NonNullable<ManagedModelConfig["thinkingLevelMap"]> = {};
+	// Build as a plain record then cast: peer ModelThinkingLevel shapes vary by pi-ai version.
+	const map: Record<string, string | null> = {};
 	const canDisable =
 		item.can_disable_thinking === true || item.only_reasoning !== true;
 
@@ -601,7 +602,9 @@ function detectThinkingLevelMap(
 		}
 	}
 
-	return Object.keys(map).length > 0 ? map : undefined;
+	return Object.keys(map).length > 0
+		? (map as NonNullable<ManagedModelConfig["thinkingLevelMap"]>)
+		: undefined;
 }
 
 function getModelName(
