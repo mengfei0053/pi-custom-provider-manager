@@ -37,17 +37,26 @@ jobs:
         run: pnpm run check
 
       - name: Verify npm auth
-        timeout-minutes: 1
+        timeout-minutes: 2
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
             echo "NPM_TOKEN secret is empty" >&2
             exit 1
           fi
-          # Fail fast; npm whoami can hang on bad/interactive auth.
-          curl -fsS --max-time 20             -H "Authorization: Bearer ${NODE_AUTH_TOKEN}"             https://registry.npmjs.org/-/whoami
+          echo "Probe registry (no auth)..."
+          curl -fsS --max-time 20 --ipv4             -o /tmp/npm-pkg.json -w "pkg_http=%{http_code} time=%{time_total}\n"             https://registry.npmjs.org/@fe-essential/pi-custom-provider-manager
+          echo "Probe whoami (auth)..."
+          code=$(curl -sS --max-time 20 --ipv4             -o /tmp/npm-whoami.json -w "%{http_code}"             -H "Authorization: Bearer ${NODE_AUTH_TOKEN}"             https://registry.npmjs.org/-/whoami || true)
+          echo "whoami_http=$code"
+          cat /tmp/npm-whoami.json || true
           echo
+          if [ "$code" != "200" ]; then
+            echo "npm auth failed (HTTP $code). Rotate repo secret NPM_TOKEN." >&2
+            exit 1
+          fi
 
       - name: Publish to npm
         timeout-minutes: 5
