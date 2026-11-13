@@ -272,7 +272,9 @@ function providerForRuntime(config: ManagedProviderConfig): ProviderConfig {
 		api: config.api,
 		headers: config.headers,
 		authHeader: config.authHeader,
-		models: (config.models ?? []).map(modelForRuntime),
+		models: (config.models ?? []).map((model) =>
+			modelForRuntime(applyProviderModelOverride(model, config.modelOverrides)),
+		),
 	};
 }
 
@@ -405,6 +407,12 @@ function usage(): string {
 		"  /provider add [id] [baseUrl] [apiKeyEnvOrValue] [displayName]",
 		"  /provider sync <id>",
 		"  /provider set <id> <baseUrl|apiKey|name|api|authHeader> <value>",
+		"  /provider model [id] [modelId]  (interactive editor)",
+		"  /provider model <id> <modelId> show",
+		"  /provider model <id> <modelId> set contextWindow <tokens>",
+		"  /provider model <id> <modelId> set thinking <off,low,medium,high,xhigh=max,max|none>",
+		"  /provider model <id> <modelId> set input <text,image>",
+		"  /provider model <id> <modelId> reset [contextWindow|thinking|input|all]",
 		"  /provider delete <id>",
 		"",
 		"Run /provider add without arguments for an interactive setup wizard.",
@@ -784,8 +792,11 @@ function applyProviderModelOverride(
 	if (!overrides) {
 		return model;
 	}
-	const byId = overrides[model.id];
-	const byNormalized = overrides[normalizeModelId(model.id)];
+	const byId = Object.hasOwn(overrides, model.id) ? overrides[model.id] : undefined;
+	const normalizedId = normalizeModelId(model.id);
+	const byNormalized = Object.hasOwn(overrides, normalizedId)
+		? overrides[normalizedId]
+		: undefined;
 	const override = byId ?? byNormalized;
 	if (!override) {
 		return model;
@@ -907,6 +918,250 @@ function collectStringValues(...values: unknown[]): string[] {
 	return result;
 }
 
+function parseModelOverride(field: string, value: string): Partial<ManagedModelConfig> {
+	if (field === "contextWindow") {
+		const tokens = Number(value);
+		if (!/^\d+$/.test(value) || !Number.isSafeInteger(tokens) || tokens <= 0) {
+			throw new Error("contextWindow must be a positive safe integer (tokens).");
+		}
+		return { contextWindow: tokens };
+	}
+	if (field === "input") {
+		const modalities = value.split(",").map((item) => item.trim());
+		if (modalities.some((item) => item !== "text" && item !== "image") || new Set(modalities).size !== modalities.length) {
+			throw new Error("input must be a non-empty, unique list of text,image. Pi does not support audio, video, or PDF as model input modalities.");
+		}
+		return { input: modalities as ("text" | "image")[] };
+	}
+	if (field !== "thinking") {
+		throw new Error(`Unsupported model field: ${field}. Use contextWindow, thinking, or input.`);
+	}
+	const map: Record<string, string | null> = Object.fromEntries(
+		PI_THINKING_LEVELS.map((level) => [level, null]),
+	);
+	if (value === "none") {
+		return { reasoning: false, thinkingLevelMap: map };
+	}
+	const seen = new Set<string>();
+	for (const entry of value.split(",")) {
+		const parts = entry.trim().split("=");
+		const level = parts[0];
+		const target = parts[1] ?? level;
+		const validLevel = (candidate: string) =>
+			PI_THINKING_LEVELS.some((known) => known === candidate);
+		if (parts.length > 2 || !validLevel(level) || !validLevel(target) || seen.has(level)) {
+			throw new Error(`Invalid or duplicate thinking level: ${entry}. Use off,minimal,low,medium,high,xhigh,max or xhigh=max.`);
+		}
+		if ((level === "off") !== (target === "off")) {
+			throw new Error("The off thinking level can only map to off.");
+		}
+		seen.add(level);
+		map[level] = target;
+	}
+	return {
+		reasoning: [...seen].some((level) => level !== "off"),
+		thinkingLevelMap: map,
+	};
+}
+
+function resetModelOverride(
+	provider: ManagedProviderConfig,
+	key: string,
+	field: string,
+): ManagedProviderConfig {
+	if (!["contextWindow", "thinking", "input", "all"].includes(field)) {
+		throw new Error("Reset field must be contextWindow, thinking, input, or all.");
+	}
+	const overrides = { ...provider.modelOverrides };
+	const override = { ...overrides[key] };
+	if (field === "all") {
+		delete overrides[key];
+	} else {
+		if (field === "contextWindow") delete override.contextWindow;
+		else if (field === "input") delete override.input;
+		else {
+			delete override.reasoning;
+			delete override.thinkingLevelMap;
+		}
+		if (Object.keys(override).length) overrides[key] = override;
+		else delete overrides[key];
+	}
+	const next: ManagedProviderConfig = { ...provider, modelOverrides: overrides };
+	if (!Object.keys(overrides).length) delete next.modelOverrides;
+	return next;
+}
+
+async function promptThinkingOverride(
+	ctx: ExtensionCommandContext,
+	model: ManagedModelConfig,
+): Promise<string | undefined> {
+	const selected = new Map<string, string>();
+	for (const level of PI_THINKING_LEVELS) {
+		const target = model.thinkingLevelMap?.[level as keyof NonNullable<ManagedModelConfig["thinkingLevelMap"]>];
+		if (typeof target === "string") selected.set(level, target);
+	}
+	while (true) {
+		const options = [
+			"保存选择 / Save",
+			"关闭思考能力 / Disable reasoning",
+			...PI_THINKING_LEVELS.map((level) =>
+				`${selected.has(level) ? "[✓]" : "[ ]"} ${level}${selected.has(level) && selected.get(level) !== level ? ` → ${selected.get(level)}` : ""}`,
+			),
+		];
+		const choice = await ctx.ui.select("选择支持的思考档位（可逐项切换，最后保存）", options);
+		if (choice === undefined) return undefined;
+		if (choice === options[1]) return "none";
+		if (choice === options[0]) {
+			if (!selected.size) {
+				ctx.ui.notify("请至少选择一个档位，或选择关闭思考能力。", "info");
+				continue;
+			}
+			return [...selected].map(([level, target]) => level === target ? level : `${level}=${target}`).join(",");
+		}
+		const level = PI_THINKING_LEVELS[options.indexOf(choice) - 2];
+		if (!level) continue;
+		if (selected.has(level)) selected.delete(level);
+		else if (level === "xhigh") {
+			const target = await ctx.ui.select("Pi xhigh 对应服务端的哪个值？", ["xhigh", "max"]);
+			if (target === undefined) return undefined;
+			selected.set(level, target);
+		} else selected.set(level, level);
+	}
+}
+
+async function promptInputOverride(
+	ctx: ExtensionCommandContext,
+	model: ManagedModelConfig,
+): Promise<string | undefined> {
+	const modalities = ["text", "image"] as const;
+	const selected = new Set<string>(model.input ?? ["text"]);
+	while (true) {
+		const options = ["保存选择 / Save", ...modalities.map((item) => `${selected.has(item) ? "[✓]" : "[ ]"} ${item}`)];
+		const choice = await ctx.ui.select("选择模型支持的输入类型（text 文本 / image 图片）", options);
+		if (choice === undefined) return undefined;
+		if (choice === options[0]) {
+			if (selected.size) return modalities.filter((item) => selected.has(item)).join(",");
+			ctx.ui.notify("请至少选择一种输入类型。", "info");
+			continue;
+		}
+		const modality = modalities[options.indexOf(choice) - 1];
+		if (!modality) continue;
+		if (selected.has(modality)) selected.delete(modality);
+		else selected.add(modality);
+	}
+}
+
+async function collectModelCommandArgs(
+	args: string[],
+	config: ModelsConfig,
+	ctx: ExtensionCommandContext,
+): Promise<string[] | undefined> {
+	if (args.length >= 3) return args;
+	if (!ctx.hasUI) throw new Error("Interactive model editing requires a UI. Use /provider model <id> <modelId> show|set|reset with explicit arguments.");
+	const providerIds = Object.keys(config.providers).sort();
+	if (!providerIds.length) throw new Error("No custom providers configured.");
+	const providerId = args[0] ?? await ctx.ui.select("选择 Provider", providerIds);
+	if (providerId === undefined) return undefined;
+	const provider = Object.hasOwn(config.providers, providerId) ? config.providers[providerId] : undefined;
+	if (!provider) throw new Error(`Provider not found: ${providerId}`);
+	const modelIds = (provider.models ?? []).map((model) => model.id);
+	if (!modelIds.length) throw new Error(`No models configured for ${providerId}. Run /provider sync ${providerId}.`);
+	const modelId = args[1] ?? await ctx.ui.select(`选择模型 · ${providerId}`, modelIds);
+	if (modelId === undefined) return undefined;
+	const model = provider.models?.find((item) => item.id === modelId);
+	if (!model) throw new Error(`Model not found: ${modelId}`);
+	const effective = applyProviderModelOverride(model, provider.modelOverrides);
+	const operations = ["查看当前配置", "编辑上下文长度", "编辑支持的思考强度", "恢复自动上下文长度", "恢复自动思考强度", "清除全部手动覆盖", "编辑支持的输入类型", "恢复自动输入类型"];
+	const operation = await ctx.ui.select(`编辑 ${providerId}/${modelId} · 当前上下文 ${effective.contextWindow ?? DEFAULT_CONTEXT_WINDOW}`, operations);
+	if (operation === undefined) return undefined;
+	const prefix = [providerId, modelId];
+	if (operation === operations[0]) return [...prefix, "show"];
+	if (operation === operations[1]) {
+		const value = await ctx.ui.input("上下文长度（正整数，单位 tokens）", String(effective.contextWindow ?? DEFAULT_CONTEXT_WINDOW));
+		return value === undefined ? undefined : [...prefix, "set", "contextWindow", value.trim()];
+	}
+	if (operation === operations[2]) {
+		const value = await promptThinkingOverride(ctx, effective);
+		return value === undefined ? undefined : [...prefix, "set", "thinking", value];
+	}
+	if (operation === operations[6]) {
+		const value = await promptInputOverride(ctx, effective);
+		return value === undefined ? undefined : [...prefix, "set", "input", value];
+	}
+	const resetFields: Record<string, string> = {
+		[operations[3]]: "contextWindow",
+		[operations[4]]: "thinking",
+		[operations[5]]: "all",
+		[operations[7]]: "input",
+	};
+	const field = resetFields[operation];
+	if (!field) return undefined;
+	const confirmed = await ctx.ui.confirm("恢复自动识别", `将清除 ${providerId}/${modelId} 的 ${field} 覆盖并重新获取模型数据，是否继续？`);
+	return confirmed ? [...prefix, "reset", field] : undefined;
+}
+
+async function handleModelCommand(
+	args: string[],
+	config: ModelsConfig,
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	const collected = await collectModelCommandArgs(args, config, ctx);
+	if (!collected) return;
+	const [providerId, modelId, action = "show", field, value, ...extra] = collected;
+	const provider = Object.hasOwn(config.providers, providerId)
+		? config.providers[providerId]
+		: undefined;
+	if (!provider) throw new Error(`Provider not found: ${providerId ?? "(missing)"}`);
+	const model = provider.models?.find((item) => item.id === modelId);
+	if (!model) throw new Error(`Model not found: ${modelId ?? "(missing)"}. Use the exact model id from /provider show ${providerId}.`);
+	const normalizedId = normalizeModelId(model.id);
+	const key = Object.hasOwn(provider.modelOverrides ?? {}, model.id)
+		? model.id
+		: Object.hasOwn(provider.modelOverrides ?? {}, normalizedId)
+			? normalizedId
+			: model.id;
+	if (action === "show") {
+		if (field !== undefined) throw new Error("Usage: /provider model <id> <modelId> show");
+		const effective = applyProviderModelOverride(model, provider.modelOverrides);
+		// Reuse existing redaction for model-level headers, and never show provider credentials.
+		const redacted = redactProvider({ headers: effective.headers });
+		ctx.ui.notify(JSON.stringify({
+			model: { ...effective, headers: redacted.headers },
+			overrideKey: key,
+			override: provider.modelOverrides?.[key]
+				? { ...provider.modelOverrides[key], headers: redactProvider({ headers: provider.modelOverrides[key].headers }).headers }
+				: {},
+		}, null, 2), "info");
+		return;
+	}
+	let next: ManagedProviderConfig;
+	if (action === "set") {
+		if (!field || !value || extra.length) {
+			throw new Error("Usage: /provider model <id> <modelId> set <contextWindow|thinking|input> <value>");
+		}
+		const override = parseModelOverride(field, value);
+		next = { ...provider, modelOverrides: {
+			...provider.modelOverrides,
+			[key]: { ...provider.modelOverrides?.[key], ...override },
+		} };
+	} else if (action === "reset") {
+		if (value !== undefined) throw new Error("Usage: /provider model <id> <modelId> reset [contextWindow|thinking|input|all]");
+		next = resetModelOverride(provider, key, field ?? "all");
+		// Fetch before writing so a failed reset leaves persisted overrides untouched.
+		next.models = await fetchRemoteModels(providerId, next);
+	} else {
+		throw new Error(`Unknown model action: ${action}. Use show, set, or reset.`);
+	}
+	config.providers[providerId] = next;
+	writeModelsConfig(config);
+	registerRuntimeProvider(pi, providerId, next);
+	ctx.ui.notify(
+		`Updated ${providerId}/${modelId}: ${action} ${field ?? "all"}. Manual overrides take priority and survive sync.`,
+		"info",
+	);
+}
+
 export default function customProviderManager(pi: ExtensionAPI) {
 	loadConfiguredProviders(pi);
 
@@ -914,7 +1169,7 @@ export default function customProviderManager(pi: ExtensionAPI) {
 		description:
 			"Manage custom providers in the extension-owned providers.json",
 		getArgumentCompletions: (prefix) => {
-			const actions = ["list", "show", "add", "sync", "set", "delete"];
+			const actions = ["list", "show", "add", "sync", "set", "model", "delete"];
 			const matches = actions.filter((action) => action.startsWith(prefix));
 			return matches.length > 0
 				? matches.map((action) => ({ value: action, label: action }))
@@ -940,6 +1195,11 @@ export default function customProviderManager(pi: ExtensionAPI) {
 				}
 
 				const providerId = rest[0];
+
+				if (action === "model") {
+					await handleModelCommand(rest, config, pi, ctx);
+					return;
+				}
 
 				if (action === "add") {
 					const input = await collectProviderAddInput(rest, ctx);
