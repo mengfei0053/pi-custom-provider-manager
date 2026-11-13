@@ -287,6 +287,290 @@ describe("custom provider manager example extension", () => {
 		}
 	});
 
+
+	it("parses Devin/CPA thinking.levels and supportedInputModalities", async () => {
+		const fixture = setup();
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (input.toString() === "https://models.dev/api.json") {
+						return new Response(JSON.stringify({}), { status: 200 });
+					}
+					return new Response(
+						JSON.stringify({
+							data: [
+								{
+									id: "other/swe-2",
+									display_name: "SWE-2 Remote",
+									context_length: 262000,
+									max_completion_tokens: 64000,
+									supportedInputModalities: ["text", "image"],
+									thinking: { levels: ["medium", "high", "max"] },
+								},
+							],
+						}),
+						{ status: 200 },
+					);
+				}),
+			);
+
+			await fixture.runProviderCommand(
+				"add cpa https://cpa.example.com/v1 CPA_KEY",
+			);
+
+			expect(fixture.registerProvider).toHaveBeenCalledWith(
+				"cpa",
+				expect.objectContaining({
+					models: expect.arrayContaining([
+						expect.objectContaining({
+							id: "other/swe-2",
+							name: "SWE-2 Remote",
+							reasoning: true,
+							contextWindow: 262000,
+							maxTokens: 64000,
+							input: ["text", "image"],
+							thinkingLevelMap: expect.objectContaining({
+								medium: "medium",
+								high: "high",
+								xhigh: "max",
+								minimal: null,
+								low: null,
+							}),
+						}),
+					]),
+				}),
+			);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	it("applies built-in Cognition overrides for sparse CPA swe-2 ids", async () => {
+		const fixture = setup();
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (input.toString() === "https://models.dev/api.json") {
+						return new Response(JSON.stringify({}), { status: 200 });
+					}
+					return new Response(
+						JSON.stringify({
+							data: [
+								{ id: "devin/swe-2", object: "model", owned_by: "cpa" },
+								{ id: "devin/swe-2-lightning" },
+								{ id: "devin/swe-1-7" },
+								{ id: "devin/swe-1-6" },
+							],
+						}),
+						{ status: 200 },
+					);
+				}),
+			);
+
+			await fixture.runProviderCommand(
+				"add cpa https://cpa.example.com/v1 CPA_KEY",
+			);
+
+			const call = fixture.registerProvider.mock.calls.find(
+				(entry) => entry[0] === "cpa",
+			);
+			expect(call).toBeTruthy();
+			const models = (
+				(call?.[1] as unknown as { models: Array<Record<string, unknown>> })
+			).models;
+
+			const swe2 = models.find((m) => m.id === "devin/swe-2");
+			expect(swe2).toMatchObject({
+				name: "SWE-2",
+				reasoning: true,
+				contextWindow: 262000,
+				maxTokens: 64000,
+				input: ["text", "image"],
+			});
+			expect(swe2?.thinkingLevelMap).toMatchObject({
+				medium: "medium",
+				high: "high",
+				xhigh: "max",
+				max: "max",
+				off: null,
+			});
+
+			const lightning = models.find((m) => m.id === "devin/swe-2-lightning");
+			expect(lightning).toMatchObject({
+				reasoning: true,
+				contextWindow: 262144,
+			});
+
+			const swe17 = models.find((m) => m.id === "devin/swe-1-7");
+			expect(swe17).toMatchObject({ reasoning: true });
+			expect(swe17?.thinkingLevelMap).toMatchObject({
+				medium: "medium",
+				high: null,
+			});
+
+			const swe16 = models.find((m) => m.id === "devin/swe-1-6");
+			expect(swe16).toMatchObject({
+				name: "SWE-1.6",
+				reasoning: false,
+			});
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	it("applies Claude 5.5 thinking levels when models.dev only sets reasoning", async () => {
+		const fixture = setup();
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (input.toString() === "https://models.dev/api.json") {
+						return new Response(
+							JSON.stringify({
+								anthropic: {
+									models: {
+										"claude-opus-5-5": {
+											id: "claude-opus-5-5",
+											name: "Claude Opus 5.5",
+											reasoning: true,
+											limit: { context: 1000000, output: 128000 },
+										},
+										"claude-sonnet-5-5": {
+											id: "claude-sonnet-5-5",
+											name: "Claude Sonnet 5.5",
+											reasoning: true,
+											limit: { context: 1000000, output: 128000 },
+										},
+									},
+								},
+							}),
+							{ status: 200 },
+						);
+					}
+					return new Response(
+						JSON.stringify({
+							data: [
+								{ id: "devin/claude-opus-5-5" },
+								{ id: "devin/claude-sonnet-5-5" },
+								{ id: "claude-opus-5-5" },
+							],
+						}),
+						{ status: 200 },
+					);
+				}),
+			);
+
+			await fixture.runProviderCommand(
+				"add cpa https://cpa.example.com/v1 CPA_KEY",
+			);
+
+			const call = fixture.registerProvider.mock.calls.find(
+				(entry) => entry[0] === "cpa",
+			);
+			expect(call).toBeTruthy();
+			const models = (
+				(call?.[1] as unknown as { models: Array<Record<string, unknown>> })
+			).models;
+
+			const expectedMap = {
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: "max",
+				max: "max",
+				off: null,
+			};
+
+			for (const id of [
+				"devin/claude-opus-5-5",
+				"devin/claude-sonnet-5-5",
+				"claude-opus-5-5",
+			]) {
+				const model = models.find((m) => m.id === id);
+				expect(model, id).toBeTruthy();
+				expect(model).toMatchObject({
+					reasoning: true,
+					contextWindow: 1000000,
+					maxTokens: 128000,
+				});
+				expect(model?.thinkingLevelMap).toMatchObject(expectedMap);
+			}
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	it("lets provider modelOverrides win after sync enrichment", async () => {
+		const fixture = setup();
+		try {
+			const tempDir = process.env.PI_CODING_AGENT_DIR!;
+			const { mkdirSync, writeFileSync } = await import("node:fs");
+			const { join } = await import("node:path");
+			const configDir = join(
+				tempDir,
+				"extensions",
+				"custom-provider-manager",
+			);
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(
+				join(configDir, "providers.json"),
+				JSON.stringify(
+					{
+						providers: {
+							cpa: {
+								baseUrl: "https://cpa.example.com/v1",
+								apiKey: "CPA_KEY",
+								modelOverrides: {
+									"devin/swe-2": {
+										contextWindow: 111111,
+										name: "SWE-2 override",
+									},
+								},
+							},
+						},
+					},
+					null,
+					"\t",
+				),
+			);
+
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (input.toString() === "https://models.dev/api.json") {
+						return new Response(JSON.stringify({}), { status: 200 });
+					}
+					return new Response(
+						JSON.stringify({ data: [{ id: "devin/swe-2" }] }),
+						{ status: 200 },
+					);
+				}),
+			);
+
+			await fixture.runProviderCommand("sync cpa");
+
+			expect(fixture.registerProvider).toHaveBeenCalledWith(
+				"cpa",
+				expect.objectContaining({
+					models: expect.arrayContaining([
+						expect.objectContaining({
+							id: "devin/swe-2",
+							name: "SWE-2 override",
+							contextWindow: 111111,
+							reasoning: true,
+							maxTokens: 64000,
+						}),
+					]),
+				}),
+			);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+
 	it("updates and deletes configured providers", async () => {
 		const fixture = setup();
 		try {

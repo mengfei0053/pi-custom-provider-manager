@@ -49,21 +49,25 @@ For provider requests, the extension sends `Authorization: Bearer <resolved key>
 
 ## Metadata enrichment
 
-The extension combines data from the provider `/models` endpoint and `models.dev`.
+The extension combines data from the provider `/models` endpoint and `models.dev`, fills known Cognition / Devin metadata gaps, then applies per-provider `modelOverrides`.
 
 Priority:
 
 ```text
-/models fields > models.dev metadata > defaults
+provider.modelOverrides > /models fields > models.dev metadata > built-in Cognition overrides > defaults
 ```
 
 Detected fields include:
 
 - Context window: `context_window`, `contextWindow`, `max_context_tokens`, `max_model_len`, `context_length`, `max_input_tokens`, `models.dev.limit.context`
 - Output limit: `max_output_tokens`, `max_completion_tokens`, `maxTokens`, `models.dev.limit.output`
-- Image input: `input`, `input_modalities`, `modalities`, `capabilities`, `models.dev.modalities.input`
-- Reasoning: `models.dev.reasoning`
+- Image input: `input`, `input_modalities`, `supportedInputModalities`, `modalities`, `capabilities`, `supports_images`, `models.dev.modalities.input`
+- Reasoning / thinking: `supports_reasoning`, `only_reasoning`, `thinking.levels` (Devin/CPA), `reasoning_supported_efforts`, `models.dev.reasoning`
 - Cost: `/models` `input_cost` / `output_cost`, plus `models.dev.cost`
+
+Built-in Cognition / Devin overrides fill sparse model metadata for SWE models and Claude Opus/Sonnet 5.5. Both bare IDs and prefixed IDs such as `devin/swe-2` are recognized. SWE-2 defaults to a 262000-token context window, 64000 output tokens, text/image input, and medium/high/max thinking levels. Pi `xhigh` maps to provider `max`; the explicit `max` level is also supported. Claude 5.5 gets low/medium/high/max thinking levels when its metadata omits usable levels.
+
+Per-provider `modelOverrides` in `providers.json` are applied after sync enrichment and take precedence for explicitly configured fields.
 
 Defaults:
 

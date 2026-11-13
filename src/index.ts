@@ -7,7 +7,7 @@
  * model list, then registers the provider immediately.
  *
  * Usage:
- *   pi -e ./packages/coding-agent/examples/extensions/custom-provider-manager.ts
+ *   pi install npm:@fe-essential/pi-custom-provider-manager
  *   /provider add my-gateway https://example.com/v1 MY_GATEWAY_API_KEY
  *   /provider sync my-gateway
  *   /provider list
@@ -85,6 +85,7 @@ interface RemoteModel {
 	maxTokens?: unknown;
 	input?: unknown;
 	input_modalities?: unknown;
+	supportedInputModalities?: unknown;
 	modalities?: unknown;
 	capabilities?: unknown;
 	input_cost?: unknown;
@@ -96,6 +97,8 @@ interface RemoteModel {
 	reasoning_default_effort?: unknown;
 	reasoning_effort?: unknown;
 	supports_images?: unknown;
+	/** Devin/CPA catalog shape: { levels: ["medium","high","max"] } */
+	thinking?: unknown;
 }
 
 interface ModelsDevModel {
@@ -137,6 +140,81 @@ const DEFAULT_COMPAT = {
 	maxTokensField: "max_tokens",
 } as ProviderModelConfig["compat"];
 const MODELS_DEV_URL = "https://models.dev/api.json";
+
+/**
+ * Local Cognition / Devin metadata when /models and models.dev omit fields.
+ * Numbers come from the CPA-embedded Devin catalog (public /v1/models is sparse).
+ * context_length for swe-2 is 262000 (not an unpublished 1M estimate).
+ */
+const SWE2_THINKING_LEVEL_MAP = {
+	off: null,
+	minimal: null,
+	low: null,
+	medium: "medium",
+	high: "high",
+	xhigh: "max",
+	max: "max",
+} as NonNullable<ManagedModelConfig["thinkingLevelMap"]>;
+
+/** CPA Devin Claude 5.5: thinking.levels low/medium/high/xhigh/max (xhigh → max like SWE). */
+const CLAUDE55_THINKING_LEVEL_MAP = {
+	off: null,
+	minimal: null,
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "max",
+	max: "max",
+} as NonNullable<ManagedModelConfig["thinkingLevelMap"]>;
+
+const COGNITION_MODEL_OVERRIDES: Record<
+	string,
+	Partial<ManagedModelConfig> & { name?: string }
+> = {
+	"swe-2": {
+		name: "SWE-2",
+		reasoning: true,
+		thinkingLevelMap: SWE2_THINKING_LEVEL_MAP,
+		input: ["text", "image"],
+		contextWindow: 262000,
+		maxTokens: 64000,
+	},
+	"swe-2-lightning": {
+		name: "SWE-2 Lightning",
+		reasoning: true,
+		thinkingLevelMap: SWE2_THINKING_LEVEL_MAP,
+		input: ["text", "image"],
+		contextWindow: 262144,
+		maxTokens: 64000,
+	},
+	"swe-1-7": {
+		name: "SWE-1.7",
+		reasoning: true,
+		thinkingLevelMap: {
+			off: null,
+			minimal: null,
+			low: null,
+			medium: "medium",
+			high: null,
+			xhigh: null,
+		} as NonNullable<ManagedModelConfig["thinkingLevelMap"]>,
+	},
+	// swe-1-6 / swe-1-6-slow: CPA catalog has no thinking field — no forced reasoning.
+	"swe-1-6": { name: "SWE-1.6" },
+	"swe-1-6-slow": { name: "SWE-1.6 Slow" },
+	// Claude 5.5 via CPA/Devin: public /v1/models omits thinking.levels; models.dev
+	// only sets reasoning=true → detectThinkingLevelMap yields {off} only.
+	"claude-opus-5-5": {
+		name: "Claude Opus 5.5",
+		reasoning: true,
+		thinkingLevelMap: CLAUDE55_THINKING_LEVEL_MAP,
+	},
+	"claude-sonnet-5-5": {
+		name: "Claude Sonnet 5.5",
+		reasoning: true,
+		thinkingLevelMap: CLAUDE55_THINKING_LEVEL_MAP,
+	},
+};
 const MODELS_DEV_CACHE_FILE = "models-dev-cache.json";
 const MODELS_DEV_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
@@ -428,7 +506,9 @@ async function fetchRemoteModels(
 		.map((item) =>
 			toManagedModel(item as RemoteModel, provider, modelsDevLookup),
 		)
-		.filter((model): model is ManagedModelConfig => model !== undefined);
+		.filter((model): model is ManagedModelConfig => model !== undefined)
+		.map((model) => applyCognitionOverrides(model))
+		.map((model) => applyProviderModelOverride(model, provider.modelOverrides));
 	if (models.length === 0) {
 		throw new Error(`GET ${url} returned no usable models.`);
 	}
@@ -544,11 +624,42 @@ const PI_THINKING_LEVELS = [
 	"max",
 ] as const;
 
+function collectRemoteThinkingLevels(item: RemoteModel): string[] {
+	const supported = new Set<string>();
+	const thinking = item.thinking;
+	if (thinking && typeof thinking === "object" && !Array.isArray(thinking)) {
+		const levels = (thinking as { levels?: unknown }).levels;
+		if (Array.isArray(levels)) {
+			for (const value of levels) {
+				if (typeof value === "string" && value.trim()) {
+					supported.add(value.trim().toLowerCase());
+				}
+			}
+		}
+	}
+	if (Array.isArray(item.reasoning_supported_efforts)) {
+		for (const value of item.reasoning_supported_efforts) {
+			if (typeof value === "string" && value.trim()) {
+				supported.add(value.trim().toLowerCase());
+			}
+		}
+	}
+	for (const value of [item.reasoning_default_effort, item.reasoning_effort]) {
+		if (typeof value === "string" && value.trim()) {
+			supported.add(value.trim().toLowerCase());
+		}
+	}
+	return [...supported];
+}
+
 function detectReasoning(
 	item: RemoteModel,
 	modelsDevModel?: ModelsDevModel,
 ): boolean {
 	if (item.supports_reasoning === true || item.only_reasoning === true) {
+		return true;
+	}
+	if (collectRemoteThinkingLevels(item).length > 0) {
 		return true;
 	}
 	if (item.supports_reasoning === false && item.only_reasoning !== true) {
@@ -565,36 +676,38 @@ function detectThinkingLevelMap(
 		return undefined;
 	}
 
-	const supported = new Set<string>();
-	if (Array.isArray(item.reasoning_supported_efforts)) {
-		for (const value of item.reasoning_supported_efforts) {
-			if (typeof value === "string" && value.trim()) {
-				supported.add(value.trim().toLowerCase());
-			}
-		}
-	}
-	for (const value of [item.reasoning_default_effort, item.reasoning_effort]) {
-		if (typeof value === "string" && value.trim()) {
-			supported.add(value.trim().toLowerCase());
-		}
-	}
+	const supported = new Set(collectRemoteThinkingLevels(item));
 
 	// Build as a plain record then cast: peer ModelThinkingLevel shapes vary by pi-ai version.
 	const map: Record<string, string | null> = {};
 	const canDisable =
-		item.can_disable_thinking === true || item.only_reasoning !== true;
+		item.can_disable_thinking === true ||
+		(item.only_reasoning !== true && !supported.size);
 
 	for (const level of PI_THINKING_LEVELS) {
 		if (level === "off") {
-			map.off = canDisable ? "off" : null;
+			map.off = supported.has("off") || canDisable ? "off" : null;
+			continue;
+		}
+		if (level === "xhigh") {
+			// Devin uses "max"; map Pi xhigh → provider "max" when advertised.
+			if (supported.has("xhigh")) {
+				map.xhigh = "xhigh";
+			} else if (supported.has("max")) {
+				map.xhigh = "max";
+			} else if (supported.size > 0) {
+				map.xhigh = null;
+			}
+			continue;
+		}
+		if (level === "max") {
+			if (supported.has("max")) {
+				map.max = "max";
+			}
 			continue;
 		}
 		if (supported.has(level)) {
 			map[level] = level;
-			continue;
-		}
-		// Mark unsupported standard levels explicitly; xhigh/max stay opt-in.
-		if (level === "xhigh" || level === "max") {
 			continue;
 		}
 		if (supported.size > 0) {
@@ -605,6 +718,83 @@ function detectThinkingLevelMap(
 	return Object.keys(map).length > 0
 		? (map as NonNullable<ManagedModelConfig["thinkingLevelMap"]>)
 		: undefined;
+}
+
+/** True when the map has at least one non-off provider level (not just {off}). */
+function thinkingMapHasUsableLevels(
+	map: ManagedModelConfig["thinkingLevelMap"] | undefined,
+): boolean {
+	if (!map) {
+		return false;
+	}
+	for (const [level, value] of Object.entries(map)) {
+		if (level === "off") {
+			continue;
+		}
+		if (typeof value === "string" && value.length > 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Fill gaps left by sparse /models + missing models.dev entries (e.g. Cognition SWE-*). */
+function applyCognitionOverrides(model: ManagedModelConfig): ManagedModelConfig {
+	const override = COGNITION_MODEL_OVERRIDES[normalizeModelId(model.id)];
+	if (!override) {
+		return model;
+	}
+	const next: ManagedModelConfig = { ...model };
+	if (override.name && (next.name === next.id || !next.name)) {
+		next.name = override.name;
+	}
+	if (!next.reasoning && override.reasoning) {
+		next.reasoning = true;
+	}
+	// Replace missing or off-only maps (models.dev reasoning without levels).
+	if (
+		override.thinkingLevelMap &&
+		!thinkingMapHasUsableLevels(next.thinkingLevelMap)
+	) {
+		next.thinkingLevelMap = override.thinkingLevelMap;
+	}
+	if (
+		next.contextWindow === DEFAULT_CONTEXT_WINDOW &&
+		override.contextWindow != null
+	) {
+		next.contextWindow = override.contextWindow;
+	}
+	if (next.maxTokens === DEFAULT_MAX_TOKENS && override.maxTokens != null) {
+		next.maxTokens = override.maxTokens;
+	}
+	if (
+		override.input &&
+		(!(next.input ?? []).includes("image") || (next.input ?? []).length === 0)
+	) {
+		next.input = override.input;
+	}
+	return next;
+}
+
+/** User/provider modelOverrides always win for explicitly set fields. */
+function applyProviderModelOverride(
+	model: ManagedModelConfig,
+	overrides: ManagedProviderConfig["modelOverrides"] | undefined,
+): ManagedModelConfig {
+	if (!overrides) {
+		return model;
+	}
+	const byId = overrides[model.id];
+	const byNormalized = overrides[normalizeModelId(model.id)];
+	const override = byId ?? byNormalized;
+	if (!override) {
+		return model;
+	}
+	return {
+		...model,
+		...override,
+		id: model.id,
+	};
 }
 
 function getModelName(
@@ -687,6 +877,7 @@ function detectInputModalities(
 	const values = collectStringValues(
 		item.input,
 		item.input_modalities,
+		item.supportedInputModalities,
 		item.modalities,
 		item.capabilities,
 		modelsDevInputs,
